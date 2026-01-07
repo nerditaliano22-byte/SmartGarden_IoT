@@ -1,0 +1,22 @@
+# .gitignore
+
+# 1. Ignore PlatformIO Build Files (The heavy stuff)
+.pio/
+build/
+.sconsign.dblite
+
+# 2. Ignore VS Code Local Settings (User specific)
+.vscode/
+
+# 3. Ignore Computed Files
+*.elf
+*.bin
+*.hex
+*.map
+
+# 4. Ignore System Junk
+.DS_Store
+Thumbs.db
+
+# 5. SECURITY (Never upload passwords)
+secrets.h
