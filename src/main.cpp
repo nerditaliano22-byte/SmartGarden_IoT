@@ -1,75 +1,77 @@
 /* ==========================================================================
-   PROJECT: SMART GARDEN - MASTER CONTROL UNIT
-   PLATFORM: ESP32 + Blynk IoT
-   HARDWARE: DFRobot Servo, Water Level Sensor, LDR, Keypad
-   AUTHORS: Nicolo' Carmelo Occhino & Francesca Calcagno 
-   
-   It control firmware. Manages local/remote control of irrigation valve.
+   PROJECT: SMART GARDEN - FINAL STABLE VERSION
    ========================================================================== */
+#include "secrets.h" 
+
+#define BLYNK_TEMPLATE_ID   SECRET_BLYNK_TEMPLATE_ID
+#define BLYNK_TEMPLATE_NAME SECRET_BLYNK_TEMPLATE_NAME
+#define BLYNK_AUTH_TOKEN    SECRET_BLYNK_AUTH_TOKEN
+#define BLYNK_PRINT Serial
 
 #include <Arduino.h>
 #include <Keypad.h>
 #include <ESP32Servo.h>
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
-#include "secrets.h" // Import credentials (ignored by Git for security)
 
-// Credentials imported from secrets.h
-#define BLYNK_TEMPLATE_ID   SECRET_BLYNK_TEMPLATE_ID
-#define BLYNK_TEMPLATE_NAME SECRET_BLYNK_TEMPLATE_NAME
-#define BLYNK_AUTH_TOKEN    SECRET_BLYNK_AUTH_TOKEN
-#define BLYNK_PRINT Serial
+#define PIN_TANK        35 
+#define PIN_LDR         32 
+#define PIN_SERVO       15 
 
+// --- CALIBRATION: CRITICAL SETTINGS ---
+// 1. Dip sensor fully in water. Check "RAW TANK" in Serial Monitor.
+// 2. Set WATER_SENSOR_MAX to that number (likely 1500-2200, NOT 4095).
+const int WATER_SENSOR_MAX = 1800;  // <--- LOWER THIS if you never get 100%
+const int WATER_SENSOR_MIN = 0;
 
-#define PIN_TANK        35 // Analog Input: Water Level Sensor
-#define PIN_LDR         32 // Analog Input: Light Dependent Resistor (LDR)
-#define PIN_SERVO       15 // PWM Output: Servo Motor Control Line
+const int TANK_EMPTY_THRESHOLD = 10;   // Below 10% = SAFETY STOP
+const int LIGHT_TRIGGER_ON = 80;       // Light > 80% = OPEN
+const int LIGHT_TRIGGER_OFF = 60;      // Light < 60% = CLOSE
 
-// Configuration for the Servo Motor (DFRobot SER0053)
+// Servo Settings
 const int PULSE_MIN = 500;
 const int PULSE_MAX = 2500;
 const int ANGLE_CLOSED = 0;
-const int ANGLE_OPEN = 54; // Calibration: 54 steps map to approx. 90° physical rotation
+const int ANGLE_OPEN = 54; 
 
-// Keypad configuration (4x4 Matrix) 
+// Keypad
 const byte ROWS = 4; 
 const byte COLS = 4; 
 char keys[ROWS][COLS] = {
-  {'1','2','3','A'}, 
-  {'4','5','6','B'},
-  {'7','8','9','C'}, 
-  {'*','0','#','D'}
+  {'1','2','3','A'}, {'4','5','6','B'},
+  {'7','8','9','C'}, {'*','0','#','D'}
 };
-// Pin mapping corrected for transposed matrix
 byte rowPins[ROWS] = {26, 25, 33, 4};  
 byte colPins[COLS] = {13, 12, 14, 27}; 
-
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
 Servo valveServo;
 BlynkTimer timer;
 
-// System states Variables
-bool manualMode = false;      // V0: 0=Auto, 1=Manual
-bool valveState = false;      // V2: 0=Closed, 1=Open
-bool notificationSent = false; 
+// State
+bool manualMode = false;      
+bool valveState = false;      
 
-// Threshold
-const int TANK_EMPTY = 10;    // Safety Lockout if Water Level < 10%
+// --- SMOOTHING FUNCTION ---
+// Takes 10 readings and averages them to remove noise
+int readSmooth(int pin) {
+    long sum = 0;
+    for(int i=0; i<10; i++) {
+        sum += analogRead(pin);
+        delay(5); // Small delay between reads
+    }
+    return sum / 10;
+}
 
-// ACTUATOR CONTROL LOGIC
-
-/**
- * Controls the physical valve and syncs with App.
- * Includes safety interlock for water level.
- */
 void setValve(bool open) {
-    int tankPct = map(analogRead(PIN_TANK), 0, 4095, 0, 100);
+    // Safety check inside Actuator Logic
+    int raw = readSmooth(PIN_TANK);
+    int pct = map(raw, WATER_SENSOR_MIN, WATER_SENSOR_MAX, 0, 100);
 
-    // SAFETY INTERLOCK: Tank Empty
-    if (open && tankPct < TANK_EMPTY && !manualMode) {
-         Serial.println("[WARNING] Safety Lockout: Tank Empty.");
+    // SAFETY INTERLOCK
+    if (open && pct < TANK_EMPTY_THRESHOLD) {
+         Serial.println("[CRITICAL] Safety Lockout: Water too low.");
          Blynk.logEvent("tank_low", "CRITICAL: Tank Empty!");
-         
          valveServo.write(ANGLE_CLOSED);
          valveState = false;
          Blynk.virtualWrite(V1, 0); 
@@ -96,95 +98,80 @@ void setMode(bool manual) {
     manualMode = manual;
     Blynk.virtualWrite(V0, manual ? 1 : 0); 
     Serial.printf(">>> SYSTEM MODE: %s\n", manual ? "MANUAL" : "AUTOMATIC");
-    if (!manual) setValve(false); // Default to safe state in Auto
+    if (!manual) setValve(false); 
 }
 
-// SENSOR ACQUISITION LOGIC
-
 void sendSensors() {
-
     Blynk.virtualWrite(V3, 0); 
 
-    // Water level processing
-    int rawTank = analogRead(PIN_TANK);
-    int tankPct = map(rawTank, 0, 4095, 0, 100);
+    // 1. Get SMOOTHED Raw Values
+    int rawTank = readSmooth(PIN_TANK);
+    int rawLight = readSmooth(PIN_LDR);
 
-    // Light level processing (inverted)
-    int rawLight = analogRead(PIN_LDR);
-    int lightPct = map(rawLight, 0, 4095, 100, 0); 
+    // 2. Map to Percentages
+    int tankPct = map(rawTank, WATER_SENSOR_MIN, WATER_SENSOR_MAX, 0, 100);
+    int lightPct = map(rawLight, 0, 4095, 100, 0); // Inverted LDR Logic
 
-    // Telemetry Transmission
+    // Clamp limits (0-100)
+    if (tankPct > 100) tankPct = 100;
+    if (tankPct < 0) tankPct = 0;
+
+    // 3. Send to Blynk
     Blynk.virtualWrite(V4, tankPct);
     Blynk.virtualWrite(V5, lightPct);
     
-    Serial.printf("[TELEMETRY] Water Lvl: %d%% | Light: %d%%\n", tankPct, lightPct);
+    // 4. DEBUG PRINT (Look at this line in Serial Monitor!)
+    Serial.printf("RAW TANK: %d | RAW LIGHT: %d || Water: %d%% | Light: %d%%\n", 
+                  rawTank, rawLight, tankPct, lightPct);
 
-    // Kernel automation
+    // 5. AUTOMATION KERNEL
     if (!manualMode) {
-        // Priority 1: Resource Availability
-        if (tankPct < TANK_EMPTY) {
-            if (valveState) { 
-                Serial.println("AUTO LOGIC: Tank Empty -> STOP."); 
-                setValve(false); 
+        // Priority 1: SAFETY (Is tank empty?)
+        if (tankPct < TANK_EMPTY_THRESHOLD) {
+            if (valveState) {
+                Serial.println("AUTO: Safety Stop (Low Water)");
+                setValve(false);
             }
         } 
-        // Auto Mode effectively acts as a "Safety Standby" mode. It will not open the valve automatically.
+        // Priority 2: TRIGGER (Is there enough light?)
         else {
-            if (valveState) { 
-                Serial.println("AUTO LOGIC: Default State -> CLOSED."); 
-                setValve(false); 
+            if (lightPct > LIGHT_TRIGGER_ON) {
+                if (!valveState) {
+                    Serial.println("AUTO: Flashlight Detected -> OPENING");
+                    setValve(true);
+                }
+            }
+            else if (lightPct < LIGHT_TRIGGER_OFF) {
+                if (valveState) {
+                    Serial.println("AUTO: Light Low -> CLOSING");
+                    setValve(false);
+                }
             }
         }
     }
-    
-    // Event Management
-    if (tankPct < TANK_EMPTY && !notificationSent) {
-        Blynk.logEvent("tank_low", "Alert: Water Tank Empty.");
-        notificationSent = true;
-    } else if (tankPct > TANK_EMPTY + 10) {
-        notificationSent = false; 
-    }
 }
 
-// HANDLE BLYNK EVENTS
-
-BLYNK_WRITE(V0) { 
-    bool reqMode = param.asInt() == 1;
-    if (reqMode != manualMode) setMode(reqMode);
-}
-
-BLYNK_WRITE(V1) { 
-    if (manualMode) {
-        setValve(param.asInt() == 1);
-    } else { 
-        Blynk.virtualWrite(V1, 0); // Reject if in Auto
-    }
-}
+BLYNK_WRITE(V0) { bool reqMode = param.asInt() == 1; if (reqMode != manualMode) setMode(reqMode); }
+BLYNK_WRITE(V1) { if (manualMode) { setValve(param.asInt() == 1); } else { Blynk.virtualWrite(V1, 0); } }
 
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n--- SMART GARDEN: SYSTEM START ---");
-
-    // Initialize Actuators
+    Serial.println("\n  SMART GARDEN: SYSTEM START  ");
     valveServo.setPeriodHertz(50);
     valveServo.attach(PIN_SERVO, PULSE_MIN, PULSE_MAX);
     valveServo.write(ANGLE_CLOSED); 
-
-    // Initialize Connectivity
+    
     Serial.print("Connecting to Blynk...");
     Blynk.begin(SECRET_BLYNK_AUTH_TOKEN, SECRET_WIFI_SSID, SECRET_WIFI_PASS);
     Serial.println(" CONNECTED.");
-
     timer.setInterval(2000L, sendSensors);
 }
 
 void loop() {
     Blynk.run();
     timer.run();
-    
     char key = keypad.getKey();
     if (key) {
-        Serial.print("Input: "); Serial.println(key);
         if (key == 'A') setMode(true);
         if (key == 'B') setMode(false);
         if (manualMode) {
@@ -193,3 +180,4 @@ void loop() {
         }
     }
 }
+
