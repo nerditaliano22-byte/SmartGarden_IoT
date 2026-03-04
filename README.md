@@ -2,7 +2,7 @@
 
 ![PlatformIO](https://img.shields.io/badge/PlatformIO-Core-orange) ![ESP32](https://img.shields.io/badge/Device-ESP32-blue) ![Blynk](https://img.shields.io/badge/IoT-Blynk-green) ![Status](https://img.shields.io/badge/Status-Active-success)
 
-**Authors:** Nicolo' Carmelo Occhino & Francesca Calcagno  
+**Authors:** Francesca Calcagno & Nicolo' Carmelo Occhino 
 **Course:** Master's Degree in Data Science course of IOT-BASED APPLICATIONS FOR INTELLIGENT SYSTEMS by Professor Davide Patti 
 
 ## 📖 Project Overview
