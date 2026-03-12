@@ -71,3 +71,8 @@ This project uses a `.gitignore` policy to secure credentials. You must manually
 #define SECRET_WIFI_PASS            "YOUR_WIFI_PASSWORD"
 
 #endif
+
+### Authors:
+Francesca Calcagno
+Nicolò Carmelo Occhino
+
